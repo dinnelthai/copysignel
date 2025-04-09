@@ -220,13 +220,59 @@ async def send_heat_report(report_type="15min"):
     # 更新最后报告时间
     last_report_times[report_type] = datetime.datetime.now()
 
+# 检查是否应该发送特定类型的报告
+def should_send_report(report_type):
+    global last_report_times
+    now = datetime.datetime.now()
+    last_time = last_report_times.get(report_type)
+    
+    if not last_time:
+        return True
+    
+    # 获取该报告类型的时间间隔
+    interval_minutes = REPORT_CONFIGS[report_type]["minutes"]
+    
+    # 计算上次发送后经过的时间
+    elapsed = now - last_time
+    elapsed_minutes = elapsed.total_seconds() / 60
+    
+    # 如果经过的时间超过了间隔的80%，并且当前分钟数是间隔的倍数，则发送
+    if elapsed_minutes >= interval_minutes * 0.8:
+        if interval_minutes < 60:
+            # 对15和30分钟的报告，检查当前分钟是否是间隔的倍数
+            return now.minute % interval_minutes == 0 and now.second < 30
+        else:
+            # 对1小时及以上的报告，检查当前小时是否是间隔的倍数
+            hours_interval = interval_minutes // 60
+            return now.hour % hours_interval == 0 and now.minute == 0 and now.second < 30
+    
+    return False
+
 # 定时发送热度报告的任务
 async def scheduled_heat_report():
+    # 初始化最后发送时间，使得程序启动后不会立即发送所有报告
+    now = datetime.datetime.now()
+    for report_type in REPORT_CONFIGS.keys():
+        # 将最后发送时间设置为当前时间减去一半间隔
+        interval_minutes = REPORT_CONFIGS[report_type]["minutes"]
+        last_report_times[report_type] = now - datetime.timedelta(minutes=interval_minutes * 0.5)
+    
     while True:
+        # 检查每种报告类型是否应该发送
         now = datetime.datetime.now()
-        next_report_times = {}
+        reports_to_send = []
         
-        # 计算每种报告类型的下一次发送时间
+        for report_type in REPORT_CONFIGS.keys():
+            if should_send_report(report_type):
+                reports_to_send.append(report_type)
+                print(f"将发送 {REPORT_CONFIGS[report_type]['display_name']} 热度报告")
+        
+        # 发送需要发送的报告
+        for report_type in reports_to_send:
+            await send_heat_report(report_type)
+        
+        # 计算下一个最近的报告时间
+        next_report_times = {}
         for report_type, config in REPORT_CONFIGS.items():
             next_time = get_next_report_time(config["minutes"])
             next_report_times[report_type] = next_time
@@ -235,16 +281,15 @@ async def scheduled_heat_report():
         next_report_type = min(next_report_times, key=lambda k: next_report_times[k])
         next_report_time = next_report_times[next_report_type]
         
-        # 计算等待时间
-        seconds_to_wait = (next_report_time - now).total_seconds()
+        # 计算等待时间，每30秒检查一次是否有报告需要发送
+        now = datetime.datetime.now()
+        seconds_to_next = (next_report_time - now).total_seconds()
+        wait_time = min(30, max(1, seconds_to_next))  # 最小1秒，最大30秒
         
-        print(f"下一次{REPORT_CONFIGS[next_report_type]['display_name']}热度报告将在 {next_report_time.strftime('%Y-%m-%d %H:%M')} 发送，等待 {seconds_to_wait:.2f} 秒")
+        print(f"下一次可能的热度报告将在 {next_report_time.strftime('%Y-%m-%d %H:%M')} 发送，等待 {wait_time:.2f} 秒后检查")
         
-        # 等待到下一个报告时间
-        await asyncio.sleep(seconds_to_wait)
-        
-        # 发送热度报告
-        await send_heat_report(next_report_type)
+        # 等待一段时间后再次检查
+        await asyncio.sleep(wait_time)
 
 # 确保正确处理频道消息
 @client.on(events.NewMessage)
@@ -328,7 +373,8 @@ async def handler(event):
         
         # 更新热度统计
         update_heat_data(normalized_address, project_name, channel_name)
-        print(f"更新热度统计: {normalized_address}, 项目名: {project_name}, 渠道: {channel_name}, 当前热度: {heat_data[normalized_address]['count']}")
+        mentions_count = len(heat_data[normalized_address]['mentions'])
+        print(f"更新热度统计: {normalized_address}, 项目名: {project_name}, 渠道: {channel_name}, 当前热度: {mentions_count}")
         
         # 检查合约地址是否已发送
         if normalized_address not in sent_addresses:
