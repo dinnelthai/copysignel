@@ -61,89 +61,190 @@ else:
 print(f"当前缓存的合约地址数量: {len(sent_addresses)}")
 
 # 热度统计相关变量
-heat_data = {}  # 格式: {contract_address: {"count": 次数, "name": 币名}}
-last_reset_time = None  # 上次重置热度的时间
-REPORT_INTERVAL_MINUTES = 15  # 热度报告间隔，每15分钟
+# 格式: {contract_address: {"name": 项目名, "mentions": [时间戳列表]}}
+heat_data = {}
+
+# 不同时间段的热度报告配置
+REPORT_CONFIGS = {
+    "15min": {"minutes": 15, "display_name": "15分钟"},
+    "30min": {"minutes": 30, "display_name": "30分钟"},
+    "1hour": {"minutes": 60, "display_name": "1小时"},
+    "3hour": {"minutes": 180, "display_name": "3小时"},
+    "6hour": {"minutes": 360, "display_name": "6小时"}
+}
+
+# 最后一次重置或报告的时间
+last_report_times = {key: None for key in REPORT_CONFIGS.keys()}
 
 # 获取下一个报告时间
-def get_next_report_time():
+def get_next_report_time(interval_minutes):
     now = datetime.datetime.now()
-    # 计算下一个15分钟的时间点
-    minutes = now.minute
-    next_slot = ((minutes // REPORT_INTERVAL_MINUTES) + 1) * REPORT_INTERVAL_MINUTES
-    if next_slot >= 60:  # 如果超过60分钟，进入下一个小时
-        next_time = now.replace(minute=next_slot % 60, second=0, microsecond=0) + datetime.timedelta(hours=1)
+    
+    if interval_minutes < 60:
+        # 对15和30分钟的处理
+        minutes = now.minute
+        next_slot = ((minutes // interval_minutes) + 1) * interval_minutes
+        if next_slot >= 60:  # 如果超过60分钟，进入下一个小时
+            next_time = now.replace(minute=next_slot % 60, second=0, microsecond=0) + datetime.timedelta(hours=1)
+        else:
+            next_time = now.replace(minute=next_slot, second=0, microsecond=0)
     else:
-        next_time = now.replace(minute=next_slot, second=0, microsecond=0)
+        # 对1小时及以上的处理
+        hours = now.hour
+        hours_interval = interval_minutes // 60
+        next_hour_slot = ((hours // hours_interval) + 1) * hours_interval
+        
+        if next_hour_slot >= 24:  # 如果超过24小时，进入下一天
+            next_time = now.replace(hour=next_hour_slot % 24, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
+        else:
+            next_time = now.replace(hour=next_hour_slot, minute=0, second=0, microsecond=0)
+    
     return next_time
 
-# 重置热度统计
-def reset_heat_data():
-    global heat_data, last_reset_time
+# 初始化热度统计
+def init_heat_data():
+    global heat_data, last_report_times
     heat_data = {}
-    last_reset_time = datetime.datetime.now()
-    print(f"热度统计已重置，时间: {last_reset_time}")
+    now = datetime.datetime.now()
+    for key in REPORT_CONFIGS.keys():
+        last_report_times[key] = now
+    print(f"热度统计已初始化，时间: {now}")
 
 # 初始化热度统计
-reset_heat_data()
+init_heat_data()
 
 # 更新热度统计
-def update_heat_data(contract_address, coin_name=None):
+def update_heat_data(contract_address, project_name=None, channel_name=None):
     global heat_data
+    now = datetime.datetime.now()
+    
     if contract_address not in heat_data:
-        heat_data[contract_address] = {"count": 0, "name": coin_name or contract_address}
-    heat_data[contract_address]["count"] += 1
-    heat_data[contract_address]["name"] = coin_name or heat_data[contract_address]["name"]
+        # 如果有项目名，使用 [渠道名] 项目名 的格式
+        display_name = project_name
+        if project_name and channel_name:
+            display_name = f"[{channel_name}] {project_name}"
+        heat_data[contract_address] = {
+            "name": display_name or contract_address,
+            "mentions": []
+        }
+    
+    # 添加当前时间戳到提及列表
+    heat_data[contract_address]["mentions"].append(now)
+    
+    # 只有当提供了项目名时才更新名称
+    if project_name:
+        # 如果已有名称不包含渠道信息，但现在有渠道信息，则更新
+        current_name = heat_data[contract_address]["name"]
+        if channel_name and not current_name.startswith(f"[{channel_name}]"):
+            heat_data[contract_address]["name"] = f"[{channel_name}] {project_name}"
+        # 如果当前名称是合约地址，则直接更新为项目名
+        elif current_name == contract_address:
+            heat_data[contract_address]["name"] = project_name
+    
+    # 清理超过6小时的旧数据，以节省内存
+    oldest_allowed = now - datetime.timedelta(hours=6)
+    for addr in heat_data:
+        heat_data[addr]["mentions"] = [ts for ts in heat_data[addr]["mentions"] if ts > oldest_allowed]
 
-# 获取热度排名
-def get_heat_ranking():
-    sorted_heat = sorted(heat_data.items(), key=lambda x: x[1]["count"], reverse=True)
+# 获取指定时间段内的热度排名
+def get_heat_ranking(minutes=15):
+    now = datetime.datetime.now()
+    time_threshold = now - datetime.timedelta(minutes=minutes)
+    
+    # 计算每个合约地址在指定时间段内的热度
+    heat_counts = {}
+    for addr, data in heat_data.items():
+        # 过滤出指定时间段内的提及
+        recent_mentions = [ts for ts in data["mentions"] if ts > time_threshold]
+        count = len(recent_mentions)
+        
+        if count > 0:  # 只包含有热度的项目
+            heat_counts[addr] = {
+                "name": data["name"],
+                "count": count
+            }
+    
+    # 按热度降序排序
+    sorted_heat = sorted(heat_counts.items(), key=lambda x: x[1]["count"], reverse=True)
     return sorted_heat
 
 # 生成热度报告消息
-def generate_heat_report():
-    ranking = get_heat_ranking()
+def generate_heat_report(report_type="15min"):
+    # 获取报告配置
+    config = REPORT_CONFIGS.get(report_type)
+    if not config:
+        return f"无效的报告类型: {report_type}"
+    
+    minutes = config["minutes"]
+    display_name = config["display_name"]
+    
+    # 获取指定时间段的排名
+    ranking = get_heat_ranking(minutes)
     if not ranking:
-        return f"过去{REPORT_INTERVAL_MINUTES}分钟内没有新的合约地址"
+        return f"过去{display_name}内没有新的合约地址"
     
-    report = f"🔥 {REPORT_INTERVAL_MINUTES}分钟热度排行 🔥\n\n"
+    # 生成报告标题
+    report = f"🔥 {display_name}热度排行 🔥\n\n"
+    
+    # 添加排名信息
     for i, (address, data) in enumerate(ranking, 1):
-        report += f"{i}. {data['name']} - 热度: {data['count']}\n"
+        # 如果名称是合约地址，则显示为"未知项目"
+        display_name = data['name']
+        if display_name == address:
+            display_name = "未知项目"
+        report += f"{i}. {display_name} - 热度: {data['count']}\n"
     
-    report += f"\n统计时间: {last_reset_time.strftime('%Y-%m-%d %H:%M')} 至 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    # 添加统计时间信息
+    now = datetime.datetime.now()
+    time_from = now - datetime.timedelta(minutes=minutes)
+    report += f"\n统计时间: {time_from.strftime('%Y-%m-%d %H:%M')} 至 {now.strftime('%Y-%m-%d %H:%M')}"
+    
     return report
 
 # 发送热度报告
-async def send_heat_report():
-    report = generate_heat_report()
-    print(f"发送热度报告:\n{report}")
+async def send_heat_report(report_type="15min"):
+    global last_report_times
+    
+    # 生成报告
+    report = generate_heat_report(report_type)
+    print(f"发送{REPORT_CONFIGS[report_type]['display_name']}热度报告:\n{report}")
     
     # 向所有目标群组发送热度报告
     for target_id in target_group_ids:
         try:
             await client.send_message(target_id, report)
-            print(f"成功发送热度报告到群组 {target_id}")
+            print(f"成功发送{REPORT_CONFIGS[report_type]['display_name']}热度报告到群组 {target_id}")
         except Exception as e:
-            print(f"发送热度报告到群组 {target_id} 失败: {e}")
+            print(f"发送{REPORT_CONFIGS[report_type]['display_name']}热度报告到群组 {target_id} 失败: {e}")
     
-    # 重置热度统计
-    reset_heat_data()
+    # 更新最后报告时间
+    last_report_times[report_type] = datetime.datetime.now()
 
 # 定时发送热度报告的任务
 async def scheduled_heat_report():
     while True:
-        # 计算到下一个报告时间的时间
-        next_report_time = get_next_report_time()
         now = datetime.datetime.now()
+        next_report_times = {}
+        
+        # 计算每种报告类型的下一次发送时间
+        for report_type, config in REPORT_CONFIGS.items():
+            next_time = get_next_report_time(config["minutes"])
+            next_report_times[report_type] = next_time
+        
+        # 找出最近的一个报告时间
+        next_report_type = min(next_report_times, key=lambda k: next_report_times[k])
+        next_report_time = next_report_times[next_report_type]
+        
+        # 计算等待时间
         seconds_to_wait = (next_report_time - now).total_seconds()
         
-        print(f"下一次热度报告将在 {next_report_time.strftime('%Y-%m-%d %H:%M')} 发送，等待 {seconds_to_wait:.2f} 秒")
+        print(f"下一次{REPORT_CONFIGS[next_report_type]['display_name']}热度报告将在 {next_report_time.strftime('%Y-%m-%d %H:%M')} 发送，等待 {seconds_to_wait:.2f} 秒")
         
         # 等待到下一个报告时间
         await asyncio.sleep(seconds_to_wait)
         
         # 发送热度报告
-        await send_heat_report()
+        await send_heat_report(next_report_type)
 
 # 确保正确处理频道消息
 @client.on(events.NewMessage)
@@ -197,15 +298,37 @@ async def handler(event):
         # 标准化合约地址（转为小写）以确保更好的去重效果
         normalized_address = contract_address.lower()
         
-        # 从消息中尝试提取币名
-        coin_name = None
-        coin_name_match = re.search(r'(?:名称|name):\s*([^\n,]+)', message_text, re.IGNORECASE)
-        if coin_name_match:
-            coin_name = coin_name_match.group(1).strip()
+        # 从消息中尝试提取项目名
+        project_name = None
+        
+        # 尝试匹配多种格式的项目名
+        # 1. 匹配 "项目: xxx" 格式
+        project_match = re.search(r'(?:项目|project):\s*([^\n,]+)', message_text, re.IGNORECASE)
+        if project_match:
+            project_name = project_match.group(1).strip()
+        
+        # 2. 如果没找到，尝试匹配 "名称: xxx" 格式
+        if not project_name:
+            name_match = re.search(r'(?:名称|name):\s*([^\n,]+)', message_text, re.IGNORECASE)
+            if name_match:
+                project_name = name_match.group(1).strip()
+        
+        # 3. 尝试匹配 AI Sniper Stats 格式中的项目名
+        if not project_name:
+            ai_match = re.search(r'\|-命中策略\(AI\):\s*([^\n]+)', message_text)
+            if ai_match:
+                strategy = ai_match.group(1).strip()
+                # 查找同一消息中的项目名
+                gem_match = re.search(r'\|-项目:\s*([^\n]+)', message_text)
+                if gem_match:
+                    project_name = gem_match.group(1).strip()
+                    # 如果找到了策略和项目名，组合它们
+                    if strategy and project_name:
+                        project_name = f"{strategy} {project_name}"
         
         # 更新热度统计
-        update_heat_data(normalized_address, coin_name)
-        print(f"更新热度统计: {normalized_address}, 币名: {coin_name}, 当前热度: {heat_data[normalized_address]['count']}")
+        update_heat_data(normalized_address, project_name, channel_name)
+        print(f"更新热度统计: {normalized_address}, 项目名: {project_name}, 渠道: {channel_name}, 当前热度: {heat_data[normalized_address]['count']}")
         
         # 检查合约地址是否已发送
         if normalized_address not in sent_addresses:
